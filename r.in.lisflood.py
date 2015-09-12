@@ -125,7 +125,7 @@ def write_n_map(friction, file_name, dem_region):
     '''write an uniform friction map from a given value
     '''
     # set the region
-    dem_region.set_raster_region()
+    dem_region.write()
     mapcalc_expression = '{map} = {value}'.format(map=file_name,
                                                 value=friction)
     Module("r.mapcalc",
