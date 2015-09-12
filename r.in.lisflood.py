@@ -38,6 +38,12 @@ COPYRIGHT: (C) 2015 by Laurent Courty
 #% required: yes
 #%end
 
+#%option G_OPT_R_OUTPUT
+#% key: start_file
+#% description: Name of output starting water depth raster map
+#% required: yes
+#%end
+
 import grass.script as grass
 import grass.temporal as tgis
 from grass.pygrass import raster
@@ -63,6 +69,7 @@ def main():
     par_encoding = chardet.detect(open(par_file, "r").read())
     rast_n_file_name = options['friction']
     rast_dem_name = options['dem']
+    rast_start_file_name = options['start_file']
     n_file = None
     friction = None
     with codecs.open(par_file, encoding=par_encoding['encoding']) as input_file:
@@ -94,6 +101,7 @@ def main():
         dem_region.from_rast(rast_dem_name)
     else:
         msgr.fatal('No {} found'.format(par_kwd['dem_file']))
+
     # friction
     if not n_file and not friction:
         msgr.fatal('Either {} or {} should be provided'.format(
@@ -105,6 +113,11 @@ def main():
             input=os.path.join(par_directory, n_file),
             output=rast_n_file_name, overwrite=grass.overwrite())
 
+    # Start file
+    if start_file:
+        r_in_gdal = Module("r.in.gdal",
+            input=os.path.join(par_directory, start_file),
+            output=rast_start_file_name, overwrite=grass.overwrite())
 
     # Make sure the original region is restored
     region.write()
