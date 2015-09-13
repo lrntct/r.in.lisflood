@@ -44,6 +44,18 @@ COPYRIGHT: (C) 2015 by Laurent Courty
 #% required: yes
 #%end
 
+#%option G_OPT_R_INPUT
+#% key: bc
+#% description: Name of output boundary conditions type raster map
+#% required: no
+#%end
+
+#%option G_OPT_R_INPUT
+#% key: bcval
+#% description: Name of output boundary conditions value raster map
+#% required: no
+#%end
+
 import grass.script as grass
 import grass.temporal as tgis
 from grass.pygrass import raster
@@ -63,16 +75,21 @@ def main():
     # Store current region
     region = Region()
 
+    # reads CLI options
+    rast_n_file_name = options['friction']
+    rast_dem_name = options['dem']
+    rast_start_file_name = options['start_file']
+    rast_bc_name = options['bc']
+    rast_bcval_name = options['bcval']
+
     # Load *.par file
     par_file = options['par_file']
     par_directory = os.path.dirname(par_file)
     par_encoding = chardet.detect(open(par_file, "r").read())
-    rast_n_file_name = options['friction']
-    rast_dem_name = options['dem']
-    rast_start_file_name = options['start_file']
+    par_file_open = codecs.open(par_file, encoding=par_encoding['encoding'])
     n_file = None
     friction = None
-    with codecs.open(par_file, encoding=par_encoding['encoding']) as input_file:
+    with par_file_open as input_file:
         for line in input_file:
             # remove starting or trailing white spaces
             line = line.strip()
@@ -119,6 +136,11 @@ def main():
             input=os.path.join(par_directory, start_file),
             output=rast_start_file_name, overwrite=grass.overwrite())
 
+    # *.bci file
+    if bci_file:
+        bci_full_path = os.path.join(par_directory, bci_file)
+        bci_content = read_bci(bci_full_path, msgr)
+
     # Make sure the original region is restored
     region.write()
     return 0
@@ -133,6 +155,13 @@ par_kwd = {'dem_file':'DEMfile',
             'n_file':'manningfile',
             'sim_time':'sim_time'}
 
+# valid key letters for boundary location
+bc_klt = ['N', 'S', 'E', 'W', 'P', 'F']
+# valid boundary types
+bc_type = ['CLOSED', 'FREE',
+            'HFIX', 'QFIX',
+            'HFIX', 'HVAR']
+
 
 def write_n_map(friction, file_name, dem_region):
     '''write an uniform friction map from a given value
@@ -145,6 +174,28 @@ def write_n_map(friction, file_name, dem_region):
         expression=mapcalc_expression,
         overwrite=grass.overwrite())
     return 0
+
+
+def read_bci(bci, msgr):
+    '''Read a boundary condition *.bci file
+    '''
+    bci_file = bci
+    bci_directory = os.path.dirname(bci_file)
+    bci_encoding = chardet.detect(open(bci_file, "r").read())
+    bci_file_open = codecs.open(bci_file, encoding=bci_encoding['encoding'])
+    bci_content = []
+    with bci_file_open as input_file:
+        for line_num, line in enumerate(input_file, 1):
+            # transform in a list without leading and trailing spaces
+            line = line.strip().split()
+            if not line or line[0] == '#':
+                continue
+            if line[0] in bc_klt:
+                bci_content.append(line)
+            if line[3] not in bc_type:
+                msgr.fatal('Unknown boundary type {} at line {}'.format(
+                                                line[3], line_num))
+    return bci_content
 
 
 if __name__ == "__main__":
