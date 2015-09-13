@@ -139,7 +139,9 @@ def main():
     # *.bci file
     if bci_file:
         bci_full_path = os.path.join(par_directory, bci_file)
-        bci_content = read_bci(bci_full_path, msgr)
+        bci = Bci(msgr, bci_full_path)
+        bci.read()
+        print bci.content
 
     # Make sure the original region is restored
     region.write()
@@ -176,26 +178,34 @@ def write_n_map(friction, file_name, dem_region):
     return 0
 
 
-def read_bci(bci, msgr):
-    '''Read a boundary condition *.bci file
+class Bci(object):
     '''
-    bci_file = bci
-    bci_directory = os.path.dirname(bci_file)
-    bci_encoding = chardet.detect(open(bci_file, "r").read())
-    bci_file_open = codecs.open(bci_file, encoding=bci_encoding['encoding'])
-    bci_content = []
-    with bci_file_open as input_file:
-        for line_num, line in enumerate(input_file, 1):
-            # transform in a list without leading and trailing spaces
-            line = line.strip().split()
-            if not line or line[0] == '#':
-                continue
-            if line[0] in bc_klt:
-                bci_content.append(line)
-            if line[3] not in bc_type:
-                msgr.fatal('Unknown boundary type {} at line {}'.format(
-                                                line[3], line_num))
-    return bci_content
+    '''
+    def __init__(self, msgr, bci_file):
+        self.bci_file = bci_file  # full path to the file
+        self.msgr = msgr
+        self.content = []
+
+
+    def read(self):
+        '''
+        '''
+        file_encoding = chardet.detect(open(self.bci_file, "r").read())
+        file_open = codecs.open(self.bci_file,
+                        encoding=file_encoding['encoding'])
+        with file_open as input_file:
+            for line_num, line in enumerate(input_file, 1):
+                # transform in a list without leading and trailing spaces
+                line = line.strip().split()
+                if not line or line[0] == '#':
+                    continue
+                if line[0] in bc_klt:
+                    self.content.append(line)
+                if line[3] not in bc_type:
+                    self.msgr.fatal(
+                        'Unknown boundary type {} at line {}'.format(
+                                            line[3], line_num))
+        return self
 
 
 if __name__ == "__main__":
