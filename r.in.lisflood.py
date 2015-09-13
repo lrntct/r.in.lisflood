@@ -83,62 +83,21 @@ def main():
     rast_bcval_name = options['bcval']
 
     # Load *.par file
-    par_file = options['par_file']
-    par_directory = os.path.dirname(par_file)
-    par_encoding = chardet.detect(open(par_file, "r").read())
-    par_file_open = codecs.open(par_file, encoding=par_encoding['encoding'])
-    n_file = None
-    friction = None
-    with par_file_open as input_file:
-        for line in input_file:
-            # remove starting or trailing white spaces
-            line = line.strip()
-            if line.startswith(par_kwd['dem_file']):
-                dem_file = line.split()[1]
-            if line.startswith(par_kwd['bci_file']):
-                bci_file = line.split()[1]
-            if line.startswith(par_kwd['bdy_file']):
-                bdy_file = line.split()[1]
-            if line.startswith(par_kwd['start_file']):
-                start_file = line.split()[1]
-            if line.startswith(par_kwd['sim_time']):
-                sim_time = line.split()[1]
-            if line.startswith(par_kwd['n_file']):
-                n_file = line.split()[1]
-            if line.startswith(par_kwd['friction']):
-                friction = line.split()[1]
+    par = Par(msgr, options['par_file'])
+    par.read()
 
-    # load DEM file
-    if dem_file:
-        r_in_gdal = Module("r.in.gdal",
-            input=os.path.join(par_directory, dem_file),
-            output=rast_dem_name, overwrite=grass.overwrite())
-        # get region from the DEM
-        dem_region = Region()
-        dem_region.from_rast(rast_dem_name)
-    else:
-        msgr.fatal('No {} found'.format(par_kwd['dem_file']))
-
-    # friction
-    if not n_file and not friction:
-        msgr.fatal('Either {} or {} should be provided'.format(
-                            par_kwd['n_file'], par_kwd['friction']))
-    if friction and not n_file:
-        write_n_map(friction, rast_n_file_name, dem_region)
-    if n_file:
-        r_in_gdal = Module("r.in.gdal",
-            input=os.path.join(par_directory, n_file),
-            output=rast_n_file_name, overwrite=grass.overwrite())
-
-    # Start file
-    if start_file:
-        r_in_gdal = Module("r.in.gdal",
-            input=os.path.join(par_directory, start_file),
-            output=rast_start_file_name, overwrite=grass.overwrite())
+    # Write DEM file
+    par.write_dem(rast_dem_name, grass.overwrite())
+    # set rcomputational region to match DEM
+    par.set_region_from_map(par.dem_file)
+    # Write friction
+    par.write_n_map(rast_n_file_name, grass.overwrite())
+    # Write start file
+    par.write_start_h(rast_start_file_name, grass.overwrite())
 
     # *.bci file
-    if bci_file:
-        bci_full_path = os.path.join(par_directory, bci_file)
+    if par.bci_file:
+        bci_full_path = os.path.join(par.directory, par.bci_file)
         bci = Bci(msgr, bci_full_path)
         bci.read()
         print bci.content
@@ -148,8 +107,12 @@ def main():
     return 0
 
 
-# keywords of the *.par file
-par_kwd = {'dem_file':'DEMfile',
+class Par(object):
+    '''
+    '''
+
+    # valid *.par keywords
+    kwd = {'dem_file':'DEMfile',
             'bci_file':'bcifile',
             'bdy_file':'bdyfile',
             'start_file':'startfile',
@@ -158,17 +121,98 @@ par_kwd = {'dem_file':'DEMfile',
             'sim_time':'sim_time'}
 
 
-def write_n_map(friction, file_name, dem_region):
-    '''write an uniform friction map from a given value
-    '''
-    # set the region
-    dem_region.write()
-    mapcalc_expression = '{map} = {value}'.format(map=file_name,
-                                                value=friction)
-    Module("r.mapcalc",
-        expression=mapcalc_expression,
-        overwrite=grass.overwrite())
-    return 0
+    def __init__(self, msgr, par_file):
+        self.msgr = msgr
+        self.par_file = par_file  # full path
+        self.directory = os.path.dirname(self.par_file)
+        self.dem_file = ''
+        self.n_file = ''
+        self.start_file = ''
+        self.bci_file = ''
+        self.bdy_file = ''
+        self.sim_time = ''
+        self.n = ''
+
+
+    def read(self):
+        '''
+        '''
+        file_encoding = chardet.detect(open(self.par_file, "r").read())
+        file_open = codecs.open(
+                    self.par_file, encoding=file_encoding['encoding'])
+        with file_open as input_file:
+            for line in input_file:
+                # remove starting or trailing white spaces
+                line = line.strip()
+                if line.startswith(self.kwd['dem_file']):
+                    self.dem_file = line.split()[1]
+                if line.startswith(self.kwd['bci_file']):
+                    self.bci_file = line.split()[1]
+                if line.startswith(self.kwd['bdy_file']):
+                    self.bdy_file = line.split()[1]
+                if line.startswith(self.kwd['start_file']):
+                    self.start_file = line.split()[1]
+                if line.startswith(self.kwd['sim_time']):
+                    self.sim_time = line.split()[1]
+                if line.startswith(self.kwd['n_file']):
+                    self.n_file = line.split()[1]
+                if line.startswith(self.kwd['friction']):
+                    self.n = line.split()[1]
+        return self
+
+
+    def write_dem(self, raster_name, overwrite):
+        '''
+        '''
+        if self.dem_file:
+            r_in_gdal = Module("r.in.gdal",
+                input=os.path.join(self.directory, self.dem_file),
+                output=raster_name, overwrite=overwrite)
+        else:
+            self.msgr.fatal('No {} found'.format(self.kwd['dem_file']))
+        return self
+
+
+    def write_n_map(self, raster_name, overwrite):
+        '''Write a GRASS map from informations of *.par file
+        in case n_file is provided, any fpfric value is discarded
+        raster_name = name of grass raster to be written (string)
+        overwrite = boolean value
+        '''
+        if not self.n_file and not self.n:
+            self.msgr.fatal('Either {} or {} should be provided'.format(
+                            par_kwd['n_file'], par_kwd['friction']))
+        if self.n and not self.n_file:
+            mapcalc_expression = '{map} = {value}'.format(
+                            map=raster_name, value=self.n)
+            Module("r.mapcalc",
+                expression=mapcalc_expression,
+                overwrite=overwrite)
+        if self.n_file:
+            r_in_gdal = Module("r.in.gdal",
+                input=os.path.join(self.directory, self.n_file),
+                output=raster_name, overwrite=overwrite)
+        return self
+
+
+    def write_start_h(self,  raster_name, overwrite):
+        '''
+        '''
+        if self.start_file:
+            r_in_gdal = Module("r.in.gdal",
+                input=os.path.join(self.directory, self.start_file),
+                output=raster_name, overwrite=overwrite)
+        return self
+
+
+    def set_region_from_map(self, map_name):
+        '''
+        '''
+        # get region from the DEM
+        self.region = Region()
+        self.region.from_rast(map_name)
+        self.region.write()
+        return self
 
 
 class Bci(object):
