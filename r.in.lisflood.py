@@ -157,13 +157,6 @@ par_kwd = {'dem_file':'DEMfile',
             'n_file':'manningfile',
             'sim_time':'sim_time'}
 
-# valid key letters for boundary location
-bc_klt = ['N', 'S', 'E', 'W', 'P', 'F']
-# valid boundary types
-bc_type = ['CLOSED', 'FREE',
-            'HFIX', 'QFIX',
-            'HFIX', 'HVAR']
-
 
 def write_n_map(friction, file_name, dem_region):
     '''write an uniform friction map from a given value
@@ -181,6 +174,15 @@ def write_n_map(friction, file_name, dem_region):
 class Bci(object):
     '''
     '''
+
+    # valid key letters for boundary location
+    klt = ['N', 'S', 'E', 'W', 'P', 'F']
+    # valid boundary types
+    bc_type = ['CLOSED', 'FREE',
+                'HFIX', 'QFIX',
+                'HFIX', 'HVAR']
+
+
     def __init__(self, msgr, bci_file):
         self.bci_file = bci_file  # full path to the file
         self.msgr = msgr
@@ -199,9 +201,9 @@ class Bci(object):
                 line = line.strip().split()
                 if not line or line[0] == '#':
                     continue
-                if line[0] in bc_klt:
+                if line[0] in self.klt:
                     self.content.append(line)
-                if line[3] not in bc_type:
+                if line[3] not in self.bc_type:
                     self.msgr.fatal(
                         'Unknown boundary type {} at line {}'.format(
                                             line[3], line_num))
