@@ -59,10 +59,12 @@ COPYRIGHT: (C) 2015 by Laurent Courty
 import grass.script as grass
 import grass.temporal as tgis
 from grass.pygrass import raster
+from grass.pygrass import utils
 from grass.pygrass.gis.region import Region
 from grass.pygrass.messages import Messenger
 from grass.pygrass.modules import Module
 
+import numpy as np
 import chardet
 import codecs
 import sys
@@ -88,19 +90,19 @@ def main():
 
     # Write DEM file
     par.write_dem(rast_dem_name, grass.overwrite())
-    # set rcomputational region to match DEM
-    par.set_region_from_map(par.dem_file)
+    # set computational region to match DEM
+    par.set_region_from_map(rast_dem_name)
     # Write friction
     par.write_n_map(rast_n_file_name, grass.overwrite())
     # Write start file
     par.write_start_h(rast_start_file_name, grass.overwrite())
 
     # *.bci file
-    if par.bci_file:
+    if par.bci_file and options['bcval'] and options['bc']:
         bci_full_path = os.path.join(par.directory, par.bci_file)
-        bci = Bci(msgr, bci_full_path)
+        bci = Bci(msgr, bci_full_path, region=par.region)
         bci.read()
-        print bci.content
+        bci.write_bc_type(rast_bc_name, grass.overwrite())
 
     # Make sure the original region is restored
     region.write()
@@ -223,14 +225,21 @@ class Bci(object):
     klt = ['N', 'S', 'E', 'W', 'P', 'F']
     # valid boundary types
     bc_type = ['CLOSED', 'FREE',
-                'HFIX', 'QFIX',
+                'QFIX', 'QVAR',
                 'HFIX', 'HVAR']
+    # Correspondance between LISFLOOD-FP boundary conditions and t.sim.flood
+    # QFIX and QVAR are taken into account in another way
+    bc_conv = {'CLOSED':1,
+                'FREE':2,
+                'HFIX':3,
+                'HVAR':3}
 
 
-    def __init__(self, msgr, bci_file):
+    def __init__(self, msgr, bci_file, region=None):
         self.bci_file = bci_file  # full path to the file
         self.msgr = msgr
         self.content = []
+        self.region = region
 
 
     def read(self):
@@ -243,7 +252,7 @@ class Bci(object):
             for line_num, line in enumerate(input_file, 1):
                 # transform in a list without leading and trailing spaces
                 line = line.strip().split()
-                if not line or line[0] == '#':
+                if not line or '#' in line[0]:
                     continue
                 if line[0] in self.klt:
                     self.content.append(line)
@@ -252,6 +261,72 @@ class Bci(object):
                         'Unknown boundary type {} at line {}'.format(
                                             line[3], line_num))
         return self
+
+
+    def write_bc_type(self, raster_name, overwrite):
+        '''
+        '''
+        arr_bctype = grass.array.array()
+        arr_bc_N = np.zeros(shape=self.region.cols, dtype=np.uint8)
+        arr_bc_S = np.zeros(shape=self.region.cols, dtype=np.uint8)
+        arr_bc_E = np.zeros(shape=self.region.rows, dtype=np.uint8)
+        arr_bc_W = np.zeros(shape=self.region.rows, dtype=np.uint8)
+        for line in self.content:
+            if line[0] == 'N':
+                self.set_bc(bc_pos=self.region.north, line=line,
+                    reg_min=self.region.west, reg_max=self.region.east,
+                    arr_result=arr_bc_N)
+            if line[0] == 'S':
+                self.set_bc(bc_pos=self.region.south, line=line,
+                    reg_min=self.region.west, reg_max=self.region.east,
+                    arr_result=arr_bc_S)
+            if line[0] == 'E':
+                self.set_bc(bc_pos=self.region.east, line=line,
+                    reg_min=self.region.south, reg_max=self.region.north,
+                    arr_result=arr_bc_E)
+            if line[0] == 'W':
+                self.set_bc(bc_pos=self.region.west, line=line,
+                    reg_min=self.region.south, reg_max=self.region.north,
+                    arr_result=arr_bc_W)
+
+        arr_bctype[:,0] = arr_bc_E
+        arr_bctype[:,-1] = arr_bc_W
+        arr_bctype[0,:] = arr_bc_N
+        arr_bctype[-1,:] = arr_bc_S
+
+        # write map in GRASS
+        arr_bctype.write(mapname=raster_name, overwrite=overwrite)
+
+        return self
+
+
+    def set_bc(self, bc_pos, reg_min, reg_max, line, arr_result):
+        # crop coordinates to fit in region
+        coord_geo1 = max(float(line[1]), reg_min)
+        coord_geo2 = min(float(line[2]), reg_max)
+        # transform into array coordinates
+        coord_arr_1 = utils.coor2pixel(
+                            (coord_geo1, bc_pos), self.region)[1]
+        coord_arr_2 = utils.coor2pixel(
+                            (coord_geo2, bc_pos), self.region)[1]
+        # assign value
+        arr_result[coord_arr_1:coord_arr_2] = self.bc_conv[line[3]]
+        return self
+
+
+    def write_bc_val(self, raster_name, overwrite):
+        '''
+        '''
+        return self
+
+
+def is_number(s):
+    try:
+        float(s)
+    except ValueError:
+        return False
+    else:
+        return True
 
 
 if __name__ == "__main__":
