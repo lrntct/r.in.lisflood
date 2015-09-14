@@ -102,7 +102,8 @@ def main():
         bci_full_path = os.path.join(par.directory, par.bci_file)
         bci = Bci(msgr, bci_full_path, region=par.region)
         bci.read()
-        bci.write_bc_type(rast_bc_name, grass.overwrite())
+        bci.write_fixed_bc(rast_bc_name, rast_bcval_name, grass.overwrite())
+
 
     # Make sure the original region is restored
     region.write()
@@ -213,6 +214,8 @@ class Par(object):
         # get region from the DEM
         self.region = Region()
         self.region.from_rast(map_name)
+        if self.region.ewres != self.region.nsres:
+            self.mesgr.fatal('Non-square cells not supported by lisflood!')
         self.region.write()
         return self
 
@@ -263,44 +266,68 @@ class Bci(object):
         return self
 
 
-    def write_bc_type(self, raster_name, overwrite):
+    def write_fixed_bc(self, rast_type_name, rast_value_name, overwrite):
         '''
         '''
+        # Boundary conditions type arrays
         arr_bctype = grass.array.array()
         arr_bc_N = np.zeros(shape=self.region.cols, dtype=np.uint8)
         arr_bc_S = np.zeros(shape=self.region.cols, dtype=np.uint8)
         arr_bc_E = np.zeros(shape=self.region.rows, dtype=np.uint8)
         arr_bc_W = np.zeros(shape=self.region.rows, dtype=np.uint8)
+
+        # Boundary conditions value arrays
+        arr_bcvalue = grass.array.array()
+        arr_bcval_N = np.zeros(shape=self.region.cols, dtype=np.float)
+        arr_bcval_S = np.zeros(shape=self.region.cols, dtype=np.float)
+        arr_bcval_E = np.zeros(shape=self.region.rows, dtype=np.float)
+        arr_bcval_W = np.zeros(shape=self.region.rows, dtype=np.float)
         for line in self.content:
             if line[0] == 'N':
-                self.set_bc(bc_pos=self.region.north, line=line,
+                self.set_fixed_bc(bc_pos=self.region.north, line=line,
                     reg_min=self.region.west, reg_max=self.region.east,
-                    arr_result=arr_bc_N)
+                    arr_type=arr_bc_N, arr_value=arr_bcval_N)
             if line[0] == 'S':
-                self.set_bc(bc_pos=self.region.south, line=line,
+                self.set_fixed_bc(bc_pos=self.region.south, line=line,
                     reg_min=self.region.west, reg_max=self.region.east,
-                    arr_result=arr_bc_S)
+                    arr_type=arr_bc_S, arr_value=arr_bcval_S)
             if line[0] == 'E':
-                self.set_bc(bc_pos=self.region.east, line=line,
+                self.set_fixed_bc(bc_pos=self.region.east, line=line,
                     reg_min=self.region.south, reg_max=self.region.north,
-                    arr_result=arr_bc_E)
+                    arr_type=arr_bc_E, arr_value=arr_bcval_E)
             if line[0] == 'W':
-                self.set_bc(bc_pos=self.region.west, line=line,
+                self.set_fixed_bc(bc_pos=self.region.west, line=line,
                     reg_min=self.region.south, reg_max=self.region.north,
-                    arr_result=arr_bc_W)
+                    arr_type=arr_bc_W, arr_value=arr_bcval_W)
 
         arr_bctype[:,0] = arr_bc_E
         arr_bctype[:,-1] = arr_bc_W
         arr_bctype[0,:] = arr_bc_N
         arr_bctype[-1,:] = arr_bc_S
 
+        arr_bcvalue[:,0] = arr_bcval_E
+        arr_bcvalue[:,-1] = arr_bcval_W
+        arr_bcvalue[0,:] = arr_bcval_N
+        arr_bcvalue[-1,:] = arr_bcval_S
+
         # write map in GRASS
-        arr_bctype.write(mapname=raster_name, overwrite=overwrite)
+        arr_bctype.write(mapname=rast_type_name, overwrite=overwrite)
+        if not np.count_nonzero(arr_bcvalue) == 0:
+            arr_bcvalue.write(mapname=rast_value_name, overwrite=overwrite)
 
         return self
 
 
-    def set_bc(self, bc_pos, reg_min, reg_max, line, arr_result):
+    def set_fixed_bc(self, bc_pos, reg_min, reg_max, line,
+                arr_type, arr_value):
+        '''bc_pos: coordinate of the considered boundary in coordinate.
+                    north, east, west or south
+        reg_min: region min boundary
+        reg_max: region min boundary
+        line: line content
+        arr_res_type: numpy array
+        arr_res_value: numpy array
+        '''
         # crop coordinates to fit in region
         coord_geo1 = max(float(line[1]), reg_min)
         coord_geo2 = min(float(line[2]), reg_max)
@@ -309,14 +336,32 @@ class Bci(object):
                             (coord_geo1, bc_pos), self.region)[1]
         coord_arr_2 = utils.coor2pixel(
                             (coord_geo2, bc_pos), self.region)[1]
+        # assign type
+        if line[3] not in ('QFIX', 'QVAR'):
+            arr_type[coord_arr_1:coord_arr_2] = self.bc_conv[line[3]]
+
         # assign value
-        arr_result[coord_arr_1:coord_arr_2] = self.bc_conv[line[3]]
+        if len(line) >= 5 and is_number(line[4]):
+            if line[3] == 'HFIX':
+                arr_value[coord_arr_1:coord_arr_2] = float(line[4])
         return self
 
 
-    def write_bc_val(self, raster_name, overwrite):
+    def get_array_coordinates(self):
         '''
         '''
+        return self
+
+
+    def write_var_bc(self, raster_name, overwrite):
+        '''
+        '''
+        var_bc = []
+        for line in self.content:
+            # write value
+            if not is_number(line[4]) and line[4]:
+                var_bc.append(line[4])
+
         return self
 
 
