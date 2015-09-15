@@ -111,12 +111,14 @@ def main():
         bci.read()
         bci.write_fixed_bc(rast_bc_name, rast_bcval_name,
                         rast_user_name, grass.overwrite())
+
     # *.bdy file
     if par.bdy_file:
         bdy_full_path = os.path.join(par.directory, par.bdy_file)
-        bdy = Bdy(msgr, bdy_full_path, bci.bdy_kwd, region=par.region)
+        bdy = Bdy(msgr, bdy_full_path, bci.bdy_kwd,
+            bcvar=bci.bcvar, region=par.region)
         bdy.read()
-        print bdy.content
+
 
 
     # Make sure the original region is restored
@@ -260,6 +262,7 @@ class Bci(object):
         self.content = []
         self.region = region
         self.bdy_kwd = []
+        self.bcvar = {}
 
 
     def read(self):
@@ -336,6 +339,13 @@ class Bci(object):
                 coord = utils.coor2pixel(
                         (float(line[1]), float(line[2])), self.region)
                 arr_user[coord] = float(line[4])
+            if line[0] == 'P' and line[3] == 'QVAR':
+                coord = utils.coor2pixel(
+                        (float(line[1]), float(line[2])), self.region)
+                self.bcvar[line[4]] = {'loc':line[0],
+                                    'type':line[3],
+                                    'bc_len':0,
+                                    'coord':coord}
 
         # write maps in GRASS
         arr_bctype.write(mapname=rast_type_name, overwrite=overwrite)
@@ -382,6 +392,12 @@ class Bci(object):
         # assign value
         if line[3] == 'HFIX':
             arr_value[coord_arr_1:coord_arr_2] = float(line[4])
+        # store location of variable conditions
+        if line[3] in ('HVAR', 'QVAR'):
+            self.bcvar[line[4]] = {'loc':line[0],
+                                    'type':line[3],
+                                    'bc_len':bc_len,
+                                    'coord':(coord_arr_1, coord_arr_2)}
         return self
 
 
@@ -391,12 +407,15 @@ class Bdy(object):
 
     kwd_units = ['days', 'hours', 'seconds']
 
-    def __init__(self, msgr, bdy_file, bdy_kwd, region=None):
+    def __init__(self, msgr, bdy_file, bdy_kwd, bcvar, region=None):
         self.bdy_file = bdy_file
         self.bdy_kwd = bdy_kwd
         self.region = region
+        self.bcvar = bcvar
+
         self.content = {}
         self.unit = {}
+
 
     def read(self):
         '''
