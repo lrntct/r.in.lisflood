@@ -111,6 +111,12 @@ def main():
         bci.read()
         bci.write_fixed_bc(rast_bc_name, rast_bcval_name,
                         rast_user_name, grass.overwrite())
+    # *.bdy file
+    if par.bdy_file:
+        bdy_full_path = os.path.join(par.directory, par.bdy_file)
+        bdy = Bdy(msgr, bdy_full_path, bci.bdy_kwd, region=par.region)
+        bdy.read()
+        print bdy.content
 
 
     # Make sure the original region is restored
@@ -253,6 +259,7 @@ class Bci(object):
         self.msgr = msgr
         self.content = []
         self.region = region
+        self.bdy_kwd = []
 
 
     def read(self):
@@ -269,6 +276,8 @@ class Bci(object):
                     continue
                 if line[0] in self.klt:
                     self.content.append(line)
+                if line[3] in ('HVAR', 'QVAR'):
+                    self.bdy_kwd.append(line[4])
                 if line[3] not in self.bc_type:
                     self.msgr.fatal(
                         'Unknown boundary type {} at line {}'.format(
@@ -352,7 +361,7 @@ class Bci(object):
         coord_geo1 = max(float(line[1]), reg_min)
         coord_geo2 = min(float(line[2]), reg_max)
         bc_len = coord_geo2 - coord_geo1
-        if bc_len <= 0:
+        if bc_len < 0:
              self.msgr.fatal(
                 'Incoherent coordinates \n {}'.format(line))
 
@@ -364,6 +373,7 @@ class Bci(object):
         # assign type
         if line[3] not in ('QFIX', 'QVAR'):
             arr_type[coord_arr_1:coord_arr_2] = self.bc_conv[line[3]]
+
         # flow in m/s for QFIX
         if line[3] == 'QFIX':
             arr_user[coord_arr_1:coord_arr_2] = (
@@ -375,21 +385,50 @@ class Bci(object):
         return self
 
 
-    def get_array_coordinates(self):
-        '''
-        '''
-        return self
+class Bdy(object):
+    """
+    """
 
+    kwd_units = ['days', 'hours', 'seconds']
 
-    def write_var_bc(self, raster_name, overwrite):
+    def __init__(self, msgr, bdy_file, bdy_kwd, region=None):
+        self.bdy_file = bdy_file
+        self.bdy_kwd = bdy_kwd
+        self.region = region
+        self.content = {}
+        self.unit = {}
+
+    def read(self):
         '''
         '''
-        var_bc = []
-        for line in self.content:
-            # write value
-            if not is_number(line[4]) and line[4]:
-                var_bc.append(line[4])
-
+        file_content = []
+        file_encoding = chardet.detect(open(self.bdy_file, "r").read())
+        file_open = codecs.open(self.bdy_file,
+                        encoding=file_encoding['encoding'])
+        # Read the file and transform it to a list of lists
+        with file_open as input_file:
+            for line_num, line in enumerate(input_file, 1):
+                if line_num == 1:
+                    continue
+                line = line.strip().split()
+                file_content.append(line)
+        for line in file_content:
+            if line[0] in self.bdy_kwd and line[0] not in self.content:
+                current_section_name = line[0]
+                current_section_line = line_num
+                self.content[current_section_name] = []
+                self.unit[current_section_name] = ''
+            if line_num == current_section_line + 1:
+                current_section_unit = Line[1]
+                self.unit[current_section_name] = current_section_unit
+                if current_section_unit not in self.kwd_units:
+                    self.msgr.fatal(
+                'Unknown unit: {} for boundary {}'.format(
+                    current_section_unit, current_section_name))
+            if is_number(line[0]) and is_number(line[1]):
+                # likely a value line
+                self.content[current_section_name].append(
+                    (float(line[0]), int(line[1])))
         return self
 
 
