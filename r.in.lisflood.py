@@ -67,6 +67,7 @@ import grass.temporal as tgis
 from grass.pygrass import raster
 from grass.pygrass import utils
 from grass.pygrass.gis.region import Region
+from grass.pygrass.gis import Mapset
 from grass.pygrass.messages import Messenger
 from grass.pygrass.modules import Module
 
@@ -118,6 +119,8 @@ def main():
         bdy = Bdy(msgr, bdy_full_path, bci.bdy_kwd,
             bcvar=bci.bcvar, region=par.region)
         bdy.read()
+        bdy.create_stds(rast_user_name, grass.overwrite())
+        bdy.write_user_flow(rast_user_name, overwrite=grass.overwrite())
 
 
 
@@ -351,8 +354,7 @@ class Bci(object):
         arr_bctype.write(mapname=rast_type_name, overwrite=overwrite)
         if not np.count_nonzero(arr_bcvalue) == 0:
             arr_bcvalue.write(mapname=rast_value_name, overwrite=overwrite)
-        if not np.count_nonzero(arr_user) == 0:
-            arr_user.write(mapname=rast_user_name, overwrite=overwrite)
+        arr_user.write(mapname=rast_user_name, overwrite=overwrite)
         return self
 
 
@@ -408,13 +410,19 @@ class Bdy(object):
     kwd_units = ['days', 'hours', 'seconds']
 
     def __init__(self, msgr, bdy_file, bdy_kwd, bcvar, region=None):
+        self.msgr = msgr
         self.bdy_file = bdy_file
         self.bdy_kwd = bdy_kwd
         self.region = region
         self.bcvar = bcvar
-
         self.content = {}
         self.unit = {}
+        self.mapset = self.set_mapset()
+
+
+    def set_mapset(self):
+        mapset = Mapset()
+        return mapset.name
 
 
     def read(self):
@@ -427,18 +435,20 @@ class Bdy(object):
         # Read the file and transform it to a list of lists
         with file_open as input_file:
             for line_num, line in enumerate(input_file, 1):
-                if line_num == 1:
+                if line_num == 1 or not line:
                     continue
                 line = line.strip().split()
                 file_content.append(line)
-        for line in file_content:
+        for line_num, line in enumerate(file_content):
+            if not line:
+                continue
             if line[0] in self.bdy_kwd and line[0] not in self.content:
                 current_section_name = line[0]
                 current_section_line = line_num
                 self.content[current_section_name] = []
                 self.unit[current_section_name] = ''
             if line_num == current_section_line + 1:
-                current_section_unit = Line[1]
+                current_section_unit = line[1]
                 self.unit[current_section_name] = current_section_unit
                 if current_section_unit not in self.kwd_units:
                     self.msgr.fatal(
@@ -448,6 +458,53 @@ class Bdy(object):
                 # likely a value line
                 self.content[current_section_name].append(
                     (float(line[0]), int(line[1])))
+        return self
+
+
+    def create_stds(self, name, overwrite):
+        stds_id = tgis.AbstractMapDataset.build_id(name, self.mapset)
+        stds_type="strds"
+        temporal_type="relative"
+        tgis.init()
+
+        self.dbif = tgis.SQLDatabaseInterfaceConnection()
+        self.dbif.connect()
+
+        self.stds_h = tgis.open_new_stds(stds_id, stds_type,
+                        temporal_type, '', '',
+                        "mean", dbif=self.dbif, overwrite=overwrite)
+        return self
+
+
+    def write_user_flow(self, rast_user_name, overwrite):
+        '''
+        '''
+        arr_user = grass.array.array(dtype=np.float32)
+        arr_user_var = grass.array.array(dtype=np.float32)
+        arr_user.read(rast_user_name)
+        map_list = []
+        for bc_key, bc_value in self.bcvar.iteritems():
+            for content in self.content[bc_key]:
+                if bc_value['loc'] == 'P':
+                    # create a grass map object
+                    rast_name_var = rast_user_name + '_' + str(content[1])
+                    rast_id_var = tgis.AbstractMapDataset.build_id(
+                                    rast_name_var, self.mapset)
+                    # set values in GRASS maps in m/s
+                    arr_user_var[bc_value['coord']] = (
+                        content[0] / self.region.ewres)
+                    # write GRASS map
+                    arr_user_var.write(mapname=rast_id_var,
+                                        overwrite=overwrite)
+                    # add temporal informations
+                    rast_var = tgis.RasterDataset(rast_id_var)
+                    rast_var.set_relative_time(start_time=content[1],
+                                end_time=None, unit=self.unit[bc_key])
+                    map_list.append(rast_var)
+        tgis.register.register_map_object_list('raster',
+                        map_list, output_stds=self.stds_h,
+                             delete_empty=True, unit=self.unit[bc_key],
+                             dbif=self.dbif)
         return self
 
 
