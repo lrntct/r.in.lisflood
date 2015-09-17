@@ -342,7 +342,7 @@ class Bci(object):
                 coord = utils.coor2pixel(
                         (float(line[1]), float(line[2])), self.region)
                 arr_user[coord] = float(line[4])
-            if line[0] == 'P' and line[3] == 'QVAR':
+            if line[0] == 'P' and line[3] in ('QVAR', 'HVAR'):
                 coord = utils.coor2pixel(
                         (float(line[1]), float(line[2])), self.region)
                 self.bcvar[line[4]] = {'loc':line[0],
@@ -461,8 +461,8 @@ class Bdy(object):
         return self
 
 
-    def create_stds(self, name, overwrite):
-        stds_id = tgis.AbstractMapDataset.build_id(name, self.mapset)
+    def create_stds(self, stds_name, overwrite):
+        stds_id = tgis.AbstractMapDataset.build_id(stds_name, self.mapset)
         stds_type="strds"
         temporal_type="relative"
         tgis.init()
@@ -470,9 +470,10 @@ class Bdy(object):
         self.dbif = tgis.SQLDatabaseInterfaceConnection()
         self.dbif.connect()
 
-        self.stds_h = tgis.open_new_stds(stds_id, stds_type,
-                        temporal_type, '', '',
-                        "mean", dbif=self.dbif, overwrite=overwrite)
+        self.stds_h = tgis.open_new_stds(name=stds_id, type=stds_type,
+                        temporaltype=temporal_type, title='', descr='',
+                        semantic="mean", dbif=self.dbif,
+                        overwrite=overwrite)
         return self
 
 
@@ -481,31 +482,62 @@ class Bdy(object):
         '''
         arr_user = grass.array.array(dtype=np.float32)
         arr_user_var = grass.array.array(dtype=np.float32)
-        arr_user.read(rast_user_name)
+        #~ arr_user.read(rast_user_name)
         map_list = []
+        # iterate in variable boundary conditions
         for bc_key, bc_value in self.bcvar.iteritems():
+            # iterate in content of a specific boundary condition
             for content in self.content[bc_key]:
+                # create a grass map object
+                rast_name_var = rast_user_name + '_' + str(content[1])
+                rast_id_var = tgis.AbstractMapDataset.build_id(
+                                rast_name_var, self.mapset)
                 if bc_value['loc'] == 'P':
-                    # create a grass map object
-                    rast_name_var = rast_user_name + '_' + str(content[1])
-                    rast_id_var = tgis.AbstractMapDataset.build_id(
-                                    rast_name_var, self.mapset)
+                    start_coord = bc_value['coord']
+                    end_coord = bc_value['coord']
                     # set values in GRASS maps in m/s
-                    arr_user_var[bc_value['coord']] = (
-                        content[0] / self.region.ewres)
-                    # write GRASS map
-                    arr_user_var.write(mapname=rast_id_var,
-                                        overwrite=overwrite)
-                    # add temporal informations
-                    rast_var = tgis.RasterDataset(rast_id_var)
-                    rast_var.set_relative_time(start_time=content[1],
-                                end_time=None, unit=self.unit[bc_key])
-                    map_list.append(rast_var)
+                    self.write_raster(start_coord, end_coord,
+                            value=(content[0] / self.region.ewres),
+                            map_id=rast_name_var, overwrite=overwrite)
+                    #~ arr_user_var[bc_value['coord']] = (
+                        #~ content[0] / self.region.ewres)
+
+                # write GRASS map
+                # add temporal informations
+                rast_var = tgis.RasterDataset(rast_id_var)
+                rast_var.set_relative_time(start_time=content[1],
+                            end_time=None, unit=self.unit[bc_key])
+                map_list.append(rast_var)
+
         tgis.register.register_map_object_list('raster',
                         map_list, output_stds=self.stds_h,
                              delete_empty=True, unit=self.unit[bc_key],
                              dbif=self.dbif)
         return self
+
+
+    def write_raster(self, start_coord, end_coord,
+                            value, map_id, overwrite):
+        start_row = start_coord[0]
+        start_col = start_coord[1]
+        end_row = end_coord[0]
+        end_col = end_coord[1]
+        assert start_row >= end_row
+        assert start_col >= end_col
+
+        if start_row == end_row:
+            row_slice = start_row
+        else:
+            row_slice = slice(start_row, end_row)
+        if start_col == end_col:
+            col_slice = start_col
+        else:
+            col_slice = slice(start_col, end_col)
+
+        arr = grass.array.array(dtype=np.float32)
+        arr[row_slice, col_slice] = value
+        arr.write(mapname=map_id, overwrite=overwrite)
+        return 0
 
 
 def is_number(s):
