@@ -489,29 +489,6 @@ class BoundaryConditions(object):
         return self
 
 
-def populate_array(start_coord, end_coord, value):
-    start_row = start_coord[0]
-    start_col = start_coord[1]
-    end_row = end_coord[0]
-    end_col = end_coord[1]
-    assert start_row >= end_row
-    assert start_col >= end_col
-
-    # Make sure slices have at least one cell
-    if start_row == end_row:
-        row_slice = start_row
-    else:
-        row_slice = slice(start_row, end_row)
-    if start_col == end_col:
-        col_slice = start_col
-    else:
-        col_slice = slice(start_col, end_col)
-    # value affectation
-    arr = grass.array.array(dtype=np.float32)
-    arr[row_slice, col_slice] = value
-    return arr
-
-
 def is_number(s):
     try:
         float(s)
