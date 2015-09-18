@@ -76,6 +76,7 @@ import chardet
 import codecs
 import sys
 import os
+import math
 
 def main():
     # start messenger
@@ -114,7 +115,9 @@ def main():
     if par.bdy_file:
         bdy_full_path = os.path.join(par.directory, par.bdy_file)
         bc.read_bdy(bdy_full_path)
-    print bc.content
+    bc.create_stds(stds_name=rast_user_name, overwrite=grass.overwrite())
+    bc.populate_user_flow_stds(rast_quser_name=rast_user_name,
+                                overwrite=grass.overwrite())
 
     # Restore original region
     grass.del_temp_region()
@@ -268,7 +271,7 @@ class BoundaryConditions(object):
         self.content = {}
         # lisflood sim_time in seconds, from .par file
         self.sim_time = sim_time
-        self.mapset = set_mapset()
+        self.mapset = self.set_mapset()
 
     def set_mapset(self):
         mapset = Mapset()
@@ -296,7 +299,7 @@ class BoundaryConditions(object):
                 msgr.fatal(
                     'File {}, line {}: Invalid format'.format(
                     os.path.basename(bci_file), line_num))
-            elif line[3] in self.type_need_value and not line[4]:
+            elif (line[3] in self.type_need_value) and (not line[4]):
                 msgr.fatal(
                     'File {}, line {}: Value needed'.format(
                     os.path.basename(bci_file), line_num))
@@ -313,13 +316,19 @@ class BoundaryConditions(object):
             elif line[3] not in self.type_var_value:
                 self.content[str(line_num)] = {'type': line[3],
                     'start_coor': self.get_array_coordinates(line)[0],
-                    'end_coor': self.get_array_coordinates(line)[1]
+                    'end_coor': self.get_array_coordinates(line)[1]}
             # Add value for fixed boundary condition
-            if (line[3] in self.type_need_value and
-                        not in self.type_var_value):
+            if ((line[3] in self.type_need_value) and
+                (line[3] not in self.type_var_value)):
+                # transform flow from m2/s to m/s
+                if line[3] == 'QFIX':
+                    fix_value = line[4] / self.region.ewres
+                if line[3] == 'HFIX':
+                    fix_value = line[4]
+                # Write values
                 self.content[str(line_num)] = {
                    'time_unit':'seconds',
-                    'values':[(line[4], 0), (line[4], self.sim_time)]}
+                    'values':[(fix_value, 0), (fix_value, self.sim_time)]}
 
         return self
 
@@ -407,7 +416,7 @@ class BoundaryConditions(object):
             if idx_exist(line, 1):
                 # line after the section is supposed to hold the unit
                 # the first element should be a number
-                if line_num == section_line_num + 1 and is_number(line[0]):
+                if (line_num == section_line_num + 1) and is_number(line[0]):
                     # check validity of the unit
                     if line[1] not in self.valid_unit:
                         msgr.fatal(
@@ -417,12 +426,22 @@ class BoundaryConditions(object):
 
                 # if both elements are numbers, it's likely the values
                 if is_number(line[0]) and is_number(line[1]):
+                    # values from m2/s to m/s
+                    if current_section['type'] == 'QVAR':
+                        len_bc = (calc_dist(current_section['start_coor'],
+                            current_section['end_coor']) *
+                            self.region.ewres)
+                        var_value = (float(line[0]) /
+                                    max(len_bc, self.region.ewres))
+                    elif current_section['type'] == 'HVAR':
+                        var_value = float(line[0])
+                    # write values
                     if 'values' not in current_section:
                         current_section['values'] = [(
-                            float(line[0]), float(line[1]))]
+                            var_value, float(line[1]))]
                     else:
                         current_section['values'].append((
-                            float(line[0]), float(line[1])))
+                            var_value, float(line[1])))
 
         return self
 
@@ -445,47 +464,55 @@ class BoundaryConditions(object):
         '''rast_quser_name: name of user flow raster map
         '''
         arr_qfix = grass.array.array(dtype=np.float32)
-        arr_user_var = grass.array.array(dtype=np.float32)
-        
-        # fixed boundary condition
-        
+        arr_qvar = grass.array.array(dtype=np.float32)
+        arr_quser = grass.array.array(dtype=np.float32)
 
         map_list = []
-        # iterate in variable boundary conditions
-        
-        for bc_key, bc_value in self.bcvar.iteritems():
-            # iterate in content of a specific boundary condition
-            for content in self.content[bc_key]:
-                if bc_value['loc'] == 'P':
-                    start_coord = bc_value['coord']
-                    end_coord = bc_value['coord']
-                    # set values in GRASS maps in m/s
-                    arr_qvar = self.populate_array(
-                            start_coord, end_coord,
-                            value=(content[0] / self.region.ewres))
-                if bc_value['loc'] == 'W':
-                    start_coord = bc_value['coord']
-                    end_coord = bc_value['coord']
-                    arr_qvar = self.populate_array(
-                            start_coord, end_coord,
-                            value=(content[0] / self.region.ewres))
+        var_map_list = []
+        # iterate in boundary conditions
+        for bc_key, bc_value in self.content.iteritems():
+            start_coord = bc_value['start_coor']
+            end_coord = bc_value['end_coor']
 
-        # Create GRASS map including all QFIX and QVAR boundary conditions
-        
-        # write GRASS map
-        rast_name_var = '{}_{}'.format(rast_user_name, str(content[1]))
-        rast_id_var = tgis.AbstractMapDataset.build_id(
-                        rast_name_var, self.mapset)
-        # add temporal informations
-        rast_var = tgis.RasterDataset(rast_id_var)
-        rast_var.set_relative_time(start_time=content[1],
-                    end_time=None, unit=self.unit[bc_key])
-        map_list.append(rast_var)
+            if bc_value['type'] == 'QFIX':
+                value = bc_value['value'][0][0]
+                if not arr_qfix:
+                    arr_qfix = populate_array(
+                                        start_coord, end_coord, value)
+                # Add all qfix together to make only one map
+                else:
+                    arr_qfix += populate_array(start_coord,
+                                                    end_coord, value)
 
+            elif bc_value['type'] == 'QVAR':
+                for bc_var_value in bc_value['values']:
+                    arr_qvar = populate_array(
+                        start_coord, end_coord, bc_var_value[0])
+                    var_map_list.append((arr_qvar,
+                                    bc_var_value[1],
+                                    bc_value['time_unit']))
+
+        for var_map in var_map_list:
+            # include all QFIX and QVAR in one map
+            arr_quser[:] = var_map[0] + arr_qfix
+            # write GRASS map
+            rast_name_var = '{}_{}'.format(
+                rast_quser_name, str(int(var_map[1])))
+            rast_id_var = tgis.AbstractMapDataset.build_id(
+                            rast_name_var, self.mapset)
+            arr_quser.write(mapname=rast_id_var, overwrite=overwrite)
+            # add temporal informations
+            rast_var = tgis.RasterDataset(rast_id_var)
+            rast_var.set_relative_time(start_time=var_map[1],
+                        end_time=None, unit=var_map[2])
+            map_list.append(rast_var)
+
+        # Register maps in the space-time dataset
+        stds = tgis.open_old_stds(rast_quser_name, 'strds', dbif=self.dbif)
         tgis.register.register_map_object_list('raster',
-                        map_list, output_stds=self.stds_h,
-                             delete_empty=True, unit=self.unit[bc_key],
-                             dbif=self.dbif)
+                            map_list, output_stds=stds,
+                                 delete_empty=True, unit=var_map[2],
+                                 dbif=self.dbif)
         return self
 
 
@@ -514,7 +541,12 @@ def idx_exist(lst, idx):
     else:
         return True
 
+def calc_dist(point1, point2):
+    return math.hypot(point2[0] - point1[0], point2[1] - point1[1])
+
 def populate_array(start_coord, end_coord, value):
+    '''start_coord, end_coord = a (row,col) tuple of array coordinates
+    '''
     start_row = start_coord[0]
     start_col = start_coord[1]
     end_row = end_coord[0]
