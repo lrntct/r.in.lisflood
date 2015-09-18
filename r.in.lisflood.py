@@ -81,8 +81,8 @@ def main():
     # start messenger
     msgr = Messenger()
 
-    # Store current region
-    region = Region()
+    # Use temporary GRASS region
+    grass.use_temp_region()
 
     # reads CLI options
     rast_n_file_name = options['friction']
@@ -105,27 +105,19 @@ def main():
     # Write start file
     par.write_start_h(rast_start_file_name, grass.overwrite())
 
-    # *.bci file
-    if par.bci_file and options['bcval'] and options['bc']:
+    # boundary conditions
+    bc = BoundaryConditions(msgr, sim_time=par.sim_time,
+                        region=par.region)
+    if par.bci_file:
         bci_full_path = os.path.join(par.directory, par.bci_file)
-        bci = Bci(msgr, bci_full_path, region=par.region)
-        bci.read()
-        bci.write_fixed_bc(rast_bc_name, rast_bcval_name,
-                        rast_user_name, grass.overwrite())
-
-    # *.bdy file
+        bc.read_bci(bci_full_path)
     if par.bdy_file:
         bdy_full_path = os.path.join(par.directory, par.bdy_file)
-        bdy = Bdy(msgr, bdy_full_path, bci.bdy_kwd,
-            bcvar=bci.bcvar, region=par.region)
-        bdy.read()
-        bdy.create_stds(rast_user_name, grass.overwrite())
-        bdy.write_user_flow(rast_user_name, overwrite=grass.overwrite())
+        bc.read_bdy(bdy_full_path)
+    print bc.content
 
-
-
-    # Make sure the original region is restored
-    region.write()
+    # Restore original region
+    grass.del_temp_region()
     return 0
 
 
@@ -140,6 +132,7 @@ class Par(object):
             'start_file':'startfile',
             'friction':'fpfric',
             'n_file':'manningfile',
+            'rain_file':'rainfall',
             'sim_time':'sim_time'}
 
 
@@ -153,6 +146,7 @@ class Par(object):
         self.bci_file = ''
         self.bdy_file = ''
         self.sim_time = ''
+        self.rain_file = ''
         self.n = ''
 
 
@@ -180,6 +174,8 @@ class Par(object):
                     self.n_file = line.split()[1]
                 if line.startswith(self.kwd['friction']):
                     self.n = line.split()[1]
+                if line.startswith(self.kwd['rain_file']):
+                    self.rain_file = line.split()[1]
                 if line.startswith('latlong'):
                     self.msgr.fatal('lat-long import is not supported')
         return self
@@ -241,225 +237,194 @@ class Par(object):
         return self
 
 
-class Bci(object):
-    '''
-    '''
+class BoundaryConditions(object):
+    """
+    """
+    # definition of valid LISFLOOD-FP keywords
+    valid_unit = ['days', 'hours', 'seconds']
+    type_need_value = ['QFIX', 'QVAR', 'HFIX', 'HVAR']
+    type_var_value = ['QVAR', 'HVAR']
+    valid_type = ['CLOSED', 'FREE'].extend(type_need_value)
+    valid_location = ['N', 'S', 'E', 'W', 'P', 'F']
 
-    # valid key letters for boundary location
-    klt = ['N', 'S', 'E', 'W', 'P', 'F']
-    # valid boundary types
-    bc_type = ['CLOSED', 'FREE',
-                'QFIX', 'QVAR',
-                'HFIX', 'HVAR']
-    # Correspondance between LISFLOOD-FP boundary conditions and t.sim.flood
-    # QFIX and QVAR are taken into account in another way
+    # Correspondance between LISFLOOD-FP boundary type and t.sim.flood
+    # QFIX and QVAR are not registered as boundary conditions in t.sim.flood
+    # but rather as user defined inflow in m/s
     bc_conv = {'CLOSED':1,
                 'FREE':2,
                 'HFIX':3,
                 'HVAR':3}
 
-
-    def __init__(self, msgr, bci_file, region=None):
-        self.bci_file = bci_file  # full path to the file
+    def __init__(self, msgr, sim_time, region):
+        '''
+        content: a dict as follow:
+        {'bc_name':{'type':'HVAR', 'start_coor':(x,y), 'end_coor':(x,y)},
+        'bc_name2':{'type':'CLOSED', 'start_coor':(x,y), 'end_coor':(x,y),
+        'time_unit':'', 'values':[(,),(,)]}  # with data read from bdy
+        ...}
+        '''
         self.msgr = msgr
-        self.content = []
         self.region = region
-        self.bdy_kwd = []
-        self.bcvar = {}
-
-
-    def read(self):
-        '''
-        '''
-        file_encoding = chardet.detect(open(self.bci_file, "r").read())
-        file_open = codecs.open(self.bci_file,
-                        encoding=file_encoding['encoding'])
-        with file_open as input_file:
-            for line_num, line in enumerate(input_file, 1):
-                # transform in a list without leading and trailing spaces
-                line = line.strip().split()
-                if not line or '#' in line[0]:
-                    continue
-                if line[0] in self.klt:
-                    self.content.append(line)
-                if line[3] in ('HVAR', 'QVAR'):
-                    self.bdy_kwd.append(line[4])
-                if line[3] not in self.bc_type:
-                    self.msgr.fatal(
-                        'Unknown boundary type {} at line {}'.format(
-                                            line[3], line_num))
-        return self
-
-
-    def write_fixed_bc(self, rast_type_name, rast_value_name,
-                        rast_user_name, overwrite):
-        '''Generate and write fixed input flow and
-        boundary conditions type and value maps
-        '''
-        # Boundary conditions type arrays
-        arr_bctype = grass.array.array(dtype=np.uint8)
-        arr_bc_N = arr_bctype[0,:]
-        arr_bc_S = arr_bctype[-1,:]
-        arr_bc_E = arr_bctype[:,0]
-        arr_bc_W = arr_bctype[:,-1]
-
-        # Boundary conditions value arrays
-        arr_bcvalue = grass.array.array(dtype=np.float32)
-        arr_bcval_N = arr_bcvalue[0,:]
-        arr_bcval_S = arr_bcvalue[-1,:]
-        arr_bcval_E = arr_bcvalue[:,0]
-        arr_bcval_W = arr_bcvalue[:,-1]
-
-        # User inflow arrays
-        arr_user = grass.array.array(dtype=np.float32)
-        arr_user_N = arr_user[0,:]
-        arr_user_S = arr_user[-1,:]
-        arr_user_E = arr_user[:,0]
-        arr_user_W = arr_user[:,-1]
-
-        for line in self.content:
-            if line[0] == 'N':
-                self.set_fixed_bc(bc_pos=self.region.north, line=line,
-                    reg_min=self.region.west, reg_max=self.region.east,
-                    arr_type=arr_bc_N, arr_value=arr_bcval_N,
-                    arr_user=arr_user_N)
-            if line[0] == 'S':
-                self.set_fixed_bc(bc_pos=self.region.south, line=line,
-                    reg_min=self.region.west, reg_max=self.region.east,
-                    arr_type=arr_bc_S, arr_value=arr_bcval_S,
-                    arr_user=arr_user_S)
-            if line[0] == 'E':
-                self.set_fixed_bc(bc_pos=self.region.east, line=line,
-                    reg_min=self.region.south, reg_max=self.region.north,
-                    arr_type=arr_bc_E, arr_value=arr_bcval_E,
-                    arr_user=arr_user_E)
-            if line[0] == 'W':
-                self.set_fixed_bc(bc_pos=self.region.west, line=line,
-                    reg_min=self.region.south, reg_max=self.region.north,
-                    arr_type=arr_bc_W, arr_value=arr_bcval_W,
-                    arr_user=arr_user_W)
-            if line[0] == 'P' and line[3] == 'QFIX':
-                coord = utils.coor2pixel(
-                        (float(line[1]), float(line[2])), self.region)
-                arr_user[coord] = float(line[4])
-            if line[0] == 'P' and line[3] in ('QVAR', 'HVAR'):
-                coord = utils.coor2pixel(
-                        (float(line[1]), float(line[2])), self.region)
-                self.bcvar[line[4]] = {'loc':line[0],
-                                    'type':line[3],
-                                    'bc_len':0,
-                                    'coord':coord}
-
-        # write maps in GRASS
-        arr_bctype.write(mapname=rast_type_name, overwrite=overwrite)
-        if not np.count_nonzero(arr_bcvalue) == 0:
-            arr_bcvalue.write(mapname=rast_value_name, overwrite=overwrite)
-        arr_user.write(mapname=rast_user_name, overwrite=overwrite)
-        return self
-
-
-    def set_fixed_bc(self, bc_pos, reg_min, reg_max, line,
-                arr_type, arr_value, arr_user):
-        '''bc_pos: coordinate of the considered boundary in coordinate.
-                    north, east, west or south
-        reg_min: region min boundary
-        reg_max: region min boundary
-        line: line content
-        arr_res_type: numpy array
-        arr_res_value: numpy array
-        arr_user: numpy array
-        '''
-        # crop coordinates to fit in region
-        coord_geo1 = max(float(line[1]), reg_min)
-        coord_geo2 = min(float(line[2]), reg_max)
-        bc_len = coord_geo2 - coord_geo1
-        if bc_len < 0:
-             self.msgr.fatal(
-                'Incoherent coordinates \n {}'.format(line))
-
-        # transform into array coordinates
-        coord_arr_1 = utils.coor2pixel(
-                            (coord_geo1, bc_pos), self.region)[1]
-        coord_arr_2 = utils.coor2pixel(
-                            (coord_geo2, bc_pos), self.region)[1]
-        # assign type
-        if line[3] not in ('QFIX', 'QVAR'):
-            arr_type[coord_arr_1:coord_arr_2] = self.bc_conv[line[3]]
-
-        # flow in m/s for QFIX
-        if line[3] == 'QFIX':
-            arr_user[coord_arr_1:coord_arr_2] = (
-                        float(line[4]) * bc_len /
-                        self.region.ewres * self.region.nsres)
-        # assign value
-        if line[3] == 'HFIX':
-            arr_value[coord_arr_1:coord_arr_2] = float(line[4])
-        # store location of variable conditions
-        if line[3] in ('HVAR', 'QVAR'):
-            self.bcvar[line[4]] = {'loc':line[0],
-                                    'type':line[3],
-                                    'bc_len':bc_len,
-                                    'coord':(coord_arr_1, coord_arr_2)}
-        return self
-
-
-class Bdy(object):
-    """
-    """
-
-    kwd_units = ['days', 'hours', 'seconds']
-
-    def __init__(self, msgr, bdy_file, bdy_kwd, bcvar, region=None):
-        self.msgr = msgr
-        self.bdy_file = bdy_file
-        self.bdy_kwd = bdy_kwd
-        self.region = region
-        self.bcvar = bcvar
         self.content = {}
-        self.unit = {}
-        self.mapset = self.set_mapset()
-
+        # lisflood sim_time in seconds, from .par file
+        self.sim_time = sim_time
+        self.mapset = set_mapset()
 
     def set_mapset(self):
         mapset = Mapset()
         return mapset.name
 
-
-    def read(self):
+    def read_bci(self, bci_file):
         '''
         '''
-        file_content = []
-        file_encoding = chardet.detect(open(self.bdy_file, "r").read())
-        file_open = codecs.open(self.bdy_file,
-                        encoding=file_encoding['encoding'])
         # Read the file and transform it to a list of lists
+        file_content = []
+        file_encoding = chardet.detect(open(bci_file, "r").read())
+        file_open = codecs.open(bci_file,
+                        encoding=file_encoding['encoding'])
         with file_open as input_file:
-            for line_num, line in enumerate(input_file, 1):
-                if line_num == 1 or not line:
-                    continue
+            for line in input_file:
                 line = line.strip().split()
+                if not line:
+                    continue
                 file_content.append(line)
+
+        # read the file content and add it to the content dict
         for line_num, line in enumerate(file_content):
-            if not line:
-                continue
-            if line[0] in self.bdy_kwd and line[0] not in self.content:
-                current_section_name = line[0]
-                current_section_line = line_num
-                self.content[current_section_name] = []
-                self.unit[current_section_name] = ''
-            if line_num == current_section_line + 1:
-                current_section_unit = line[1]
-                self.unit[current_section_name] = current_section_unit
-                if current_section_unit not in self.kwd_units:
-                    self.msgr.fatal(
-                'Unknown unit: {} for boundary {}'.format(
-                    current_section_unit, current_section_name))
-            if is_number(line[0]) and is_number(line[1]):
-                # likely a value line
-                self.content[current_section_name].append(
-                    (float(line[0]), int(line[1])))
+            # Check validity
+            if not is_bci_line_valid(line):
+                msgr.fatal(
+                    'File {}, line {}: Invalid format'.format(
+                    os.path.basename(bci_file), line_num))
+            elif line[3] in self.type_need_value and not line[4]:
+                msgr.fatal(
+                    'File {}, line {}: Value needed'.format(
+                    os.path.basename(bci_file), line_num))
+            elif line[3] in self.type_var_value and (
+                not idx_exist(line, 4) or is_number(line[4])):
+                msgr.fatal(
+                    'File {}, line {}: Time-series name needed'.format(
+                    os.path.basename(bci_file), line_num))
+            # Assign boundary conditions data
+            elif line[3] in self.type_var_value:
+                self.content[line[4]] = {'type': line[3],
+                    'start_coor': self.get_array_coordinates(line)[0],
+                    'end_coor': self.get_array_coordinates(line)[1]}
+            elif line[3] not in self.type_var_value:
+                self.content[str(line_num)] = {'type': line[3],
+                    'start_coor': self.get_array_coordinates(line)[0],
+                    'end_coor': self.get_array_coordinates(line)[1]
+            # Add value for fixed boundary condition
+            if (line[3] in self.type_need_value and
+                        not in self.type_var_value):
+                self.content[str(line_num)] = {
+                   'time_unit':'seconds',
+                    'values':[(line[4], 0), (line[4], self.sim_time)]}
+
         return self
 
+    def get_array_coordinates(self, line):
+        if line[0] == 'P':
+            coord_geo1_row = float(line[2])
+            coord_geo1_col = float(line[1])
+            coord_geo2_row = float(line[2])
+            coord_geo2_col = float(line[1])
+        if line[0] == 'E':
+            coord_geo1_row = float(line[2])
+            coord_geo1_col = self.region.east
+            coord_geo2_row = float(line[1])
+            coord_geo2_col = self.region.east
+        if line[0] == 'W':
+            coord_geo1_row = float(line[2])
+            coord_geo1_col = self.region.west
+            coord_geo2_row = float(line[1])
+            coord_geo2_col = self.region.west
+        if line[0] == 'N':
+            coord_geo1_row = self.region.north
+            coord_geo1_col = float(line[2])
+            coord_geo2_row = self.region.north
+            coord_geo2_col = float(line[1])
+        if line[0] == 'S':
+            coord_geo1_row = self.region.south
+            coord_geo1_col = float(line[2])
+            coord_geo2_row = self.region.south
+            coord_geo2_col = float(line[1])
+
+        assert is_number(coord_geo1_row)
+        assert is_number(coord_geo1_col)
+        assert is_number(coord_geo2_row)
+        assert is_number(coord_geo2_col)
+
+        # crop coordinates to fit in region
+        coord_geo1_row = max(coord_geo1_row, self.region.south)
+        coord_geo1_col = max(coord_geo1_col, self.region.west)
+        coord_geo2_row = min(coord_geo2_row, self.region.north)
+        coord_geo2_col = min(coord_geo2_col, self.region.east)
+
+        bc_len_row = coord_geo1_row - coord_geo2_row
+        bc_len_col = coord_geo1_col - coord_geo2_col
+        if bc_len_row < 0 or bc_len_col < 0:
+             self.msgr.fatal(
+                'Incoherent coordinates \n {}'.format(line))
+
+        # transform into array coordinates
+        coord_arr_1 = utils.coor2pixel(
+                        (coord_geo1_col, coord_geo1_row), self.region)
+        coord_arr_2 = utils.coor2pixel(
+                        (coord_geo2_col, coord_geo2_row), self.region)
+        return (coord_arr_1, coord_arr_2)
+
+    def read_bdy(self, bdy_file):
+        '''
+        '''
+        # Read the file and transform it to a list of lists
+        file_content = []
+        file_encoding = chardet.detect(open(bdy_file, "r").read())
+        file_open = codecs.open(bdy_file,
+                        encoding=file_encoding['encoding'])
+        with file_open as input_file:
+            for line_num, line in enumerate(input_file, 1):
+                line = line.strip().split()
+                if line_num == 1 or not line:
+                    continue
+                file_content.append(line)
+
+        # read the file content and add it to the content dict
+        for line_num, line in enumerate(file_content):
+            # detect the start of a section
+            if line[0] in self.content:
+                # if key 'unit' already in content dict, it's likely that
+                # the section has already been encountered
+                if 'time_unit' in self.content[line[0]]:
+                    msgr.fatal(
+                        'Line {}: Boundary condition {} already read'.format(
+                            line_num, line[0]))
+                section_name = line[0]
+                section_line_num = line_num
+                current_section = self.content[section_name]
+
+            # only if at least 2 elements in line
+            if idx_exist(line, 1):
+                # line after the section is supposed to hold the unit
+                # the first element should be a number
+                if line_num == section_line_num + 1 and is_number(line[0]):
+                    # check validity of the unit
+                    if line[1] not in self.valid_unit:
+                        msgr.fatal(
+                            'Line {}: unit {} unknown'.format(
+                                line_num, line[1]))
+                    current_section['time_unit'] = line[1]
+
+                # if both elements are numbers, it's likely the values
+                if is_number(line[0]) and is_number(line[1]):
+                    if 'values' not in current_section:
+                        current_section['values'] = [(
+                            float(line[0]), float(line[1]))]
+                    else:
+                        current_section['values'].append((
+                            float(line[0]), float(line[1])))
+
+        return self
 
     def create_stds(self, stds_name, overwrite):
         stds_id = tgis.AbstractMapDataset.build_id(stds_name, self.mapset)
@@ -471,43 +436,51 @@ class Bdy(object):
         self.dbif.connect()
 
         self.stds_h = tgis.open_new_stds(name=stds_id, type=stds_type,
-                        temporaltype=temporal_type, title='', descr='',
-                        semantic="mean", dbif=self.dbif,
-                        overwrite=overwrite)
+                    temporaltype=temporal_type, title='', descr='',
+                    semantic="mean", dbif=self.dbif,
+                    overwrite=overwrite)
         return self
 
-
-    def write_user_flow(self, rast_user_name, overwrite):
+    def populate_user_flow_stds(self, rast_quser_name, overwrite):
+        '''rast_quser_name: name of user flow raster map
         '''
-        '''
-        arr_user = grass.array.array(dtype=np.float32)
+        arr_qfix = grass.array.array(dtype=np.float32)
         arr_user_var = grass.array.array(dtype=np.float32)
-        #~ arr_user.read(rast_user_name)
+        
+        # fixed boundary condition
+        
+
         map_list = []
         # iterate in variable boundary conditions
+        
         for bc_key, bc_value in self.bcvar.iteritems():
             # iterate in content of a specific boundary condition
             for content in self.content[bc_key]:
-                # create a grass map object
-                rast_name_var = rast_user_name + '_' + str(content[1])
-                rast_id_var = tgis.AbstractMapDataset.build_id(
-                                rast_name_var, self.mapset)
                 if bc_value['loc'] == 'P':
                     start_coord = bc_value['coord']
                     end_coord = bc_value['coord']
                     # set values in GRASS maps in m/s
-                    self.write_raster(start_coord, end_coord,
-                            value=(content[0] / self.region.ewres),
-                            map_id=rast_name_var, overwrite=overwrite)
-                    #~ arr_user_var[bc_value['coord']] = (
-                        #~ content[0] / self.region.ewres)
+                    arr_qvar = self.populate_array(
+                            start_coord, end_coord,
+                            value=(content[0] / self.region.ewres))
+                if bc_value['loc'] == 'W':
+                    start_coord = bc_value['coord']
+                    end_coord = bc_value['coord']
+                    arr_qvar = self.populate_array(
+                            start_coord, end_coord,
+                            value=(content[0] / self.region.ewres))
 
-                # write GRASS map
-                # add temporal informations
-                rast_var = tgis.RasterDataset(rast_id_var)
-                rast_var.set_relative_time(start_time=content[1],
-                            end_time=None, unit=self.unit[bc_key])
-                map_list.append(rast_var)
+        # Create GRASS map including all QFIX and QVAR boundary conditions
+        
+        # write GRASS map
+        rast_name_var = '{}_{}'.format(rast_user_name, str(content[1]))
+        rast_id_var = tgis.AbstractMapDataset.build_id(
+                        rast_name_var, self.mapset)
+        # add temporal informations
+        rast_var = tgis.RasterDataset(rast_id_var)
+        rast_var.set_relative_time(start_time=content[1],
+                    end_time=None, unit=self.unit[bc_key])
+        map_list.append(rast_var)
 
         tgis.register.register_map_object_list('raster',
                         map_list, output_stds=self.stds_h,
@@ -516,28 +489,27 @@ class Bdy(object):
         return self
 
 
-    def write_raster(self, start_coord, end_coord,
-                            value, map_id, overwrite):
-        start_row = start_coord[0]
-        start_col = start_coord[1]
-        end_row = end_coord[0]
-        end_col = end_coord[1]
-        assert start_row >= end_row
-        assert start_col >= end_col
+def populate_array(start_coord, end_coord, value):
+    start_row = start_coord[0]
+    start_col = start_coord[1]
+    end_row = end_coord[0]
+    end_col = end_coord[1]
+    assert start_row >= end_row
+    assert start_col >= end_col
 
-        if start_row == end_row:
-            row_slice = start_row
-        else:
-            row_slice = slice(start_row, end_row)
-        if start_col == end_col:
-            col_slice = start_col
-        else:
-            col_slice = slice(start_col, end_col)
-
-        arr = grass.array.array(dtype=np.float32)
-        arr[row_slice, col_slice] = value
-        arr.write(mapname=map_id, overwrite=overwrite)
-        return 0
+    # Make sure slices have at least one cell
+    if start_row == end_row:
+        row_slice = start_row
+    else:
+        row_slice = slice(start_row, end_row)
+    if start_col == end_col:
+        col_slice = start_col
+    else:
+        col_slice = slice(start_col, end_col)
+    # value affectation
+    arr = grass.array.array(dtype=np.float32)
+    arr[row_slice, col_slice] = value
+    return arr
 
 
 def is_number(s):
@@ -548,6 +520,44 @@ def is_number(s):
     else:
         return True
 
+def is_bci_line_valid(line):
+    if not idx_exist(line, 3):
+        return False
+    else:
+        return (not is_number(line[0])
+                and is_number(line[1])
+                and is_number(line[2])
+                and not is_number(line[3]))
+
+def idx_exist(lst, idx):
+    try:
+        lst[idx]
+    except IndexError:
+        return False
+    else:
+        return True
+
+def populate_array(start_coord, end_coord, value):
+    start_row = start_coord[0]
+    start_col = start_coord[1]
+    end_row = end_coord[0]
+    end_col = end_coord[1]
+    assert start_row >= end_row
+    assert start_col >= end_col
+
+    # Make sure slices have at least one cell
+    if start_row == end_row:
+        row_slice = start_row
+    else:
+        row_slice = slice(start_row, end_row)
+    if start_col == end_col:
+        col_slice = start_col
+    else:
+        col_slice = slice(start_col, end_col)
+    # value affectation
+    arr = grass.array.array(dtype=np.float32)
+    arr[row_slice, col_slice] = value
+    return arr
 
 if __name__ == "__main__":
     options, flags = grass.parser()
