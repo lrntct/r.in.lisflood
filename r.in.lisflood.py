@@ -63,6 +63,7 @@ COPYRIGHT: (C) 2015 by Laurent Courty
 #%end
 
 import grass.script as grass
+import grass.script.array as garray
 import grass.temporal as tgis
 from grass.pygrass import raster
 from grass.pygrass import utils
@@ -116,8 +117,10 @@ def main():
         bdy_full_path = os.path.join(par.directory, par.bdy_file)
         bc.read_bdy(bdy_full_path)
     bc.create_stds(stds_name=rast_user_name, overwrite=grass.overwrite())
+    bc.create_stds(rast_bcval_name, overwrite=grass.overwrite())
     bc.populate_user_flow_stds(rast_quser_name=rast_user_name,
                                 overwrite=grass.overwrite())
+    bc.populate_bc_stds(rast_bcval_name, grass.overwrite())
 
     # Restore original region
     grass.del_temp_region()
@@ -151,7 +154,7 @@ class Par(object):
         self.sim_time = ''
         self.rain_file = ''
         self.n = ''
-
+        self.region=Region()
 
     def read(self):
         '''
@@ -232,11 +235,9 @@ class Par(object):
         '''
         '''
         # get region from the DEM
-        self.region = Region()
-        self.region.from_rast(map_name)
+        grass.run_command('g.region', raster=map_name)
         if self.region.ewres != self.region.nsres:
             self.mesgr.fatal('Non-square cells not supported by lisflood!')
-        self.region.write()
         return self
 
 
@@ -350,14 +351,14 @@ class BoundaryConditions(object):
             coord_geo2_col = self.region.west
         if line[0] == 'N':
             coord_geo1_row = self.region.north
-            coord_geo1_col = float(line[2])
+            coord_geo1_col = float(line[1])
             coord_geo2_row = self.region.north
-            coord_geo2_col = float(line[1])
+            coord_geo2_col = float(line[2])
         if line[0] == 'S':
             coord_geo1_row = self.region.south
-            coord_geo1_col = float(line[2])
+            coord_geo1_col = float(line[1])
             coord_geo2_row = self.region.south
-            coord_geo2_col = float(line[1])
+            coord_geo2_col = float(line[2])
 
         assert is_number(coord_geo1_row)
         assert is_number(coord_geo1_col)
@@ -370,8 +371,8 @@ class BoundaryConditions(object):
         coord_geo2_row = min(coord_geo2_row, self.region.north)
         coord_geo2_col = min(coord_geo2_col, self.region.east)
 
-        bc_len_row = coord_geo1_row - coord_geo2_row
-        bc_len_col = coord_geo1_col - coord_geo2_col
+        bc_len_row = coord_geo2_row - coord_geo1_row
+        bc_len_col = coord_geo2_col - coord_geo1_col
         if bc_len_row < 0 or bc_len_col < 0:
              self.msgr.fatal(
                 'Incoherent coordinates \n {}'.format(line))
@@ -460,12 +461,61 @@ class BoundaryConditions(object):
                     overwrite=overwrite)
         return self
 
+    def populate_bc_stds(self, rast_bcvalue_name, overwrite):
+        '''rast_bc_name: name of boundary condition value raster map
+        '''
+        arr_fix = np.zeros(shape=(self.region.rows,self.region.cols),
+                    dtype=np.float32)
+        arr_var = np.copy(arr_fix)
+
+        map_list = []
+        var_map_list = []
+        # iterate in boundary conditions
+        for bc_key, bc_value in self.content.iteritems():
+            start_coord = bc_value['start_coor']
+            end_coord = bc_value['end_coor']
+
+            if bc_value['type'] == 'HFIX':
+                value = bc_value['value'][0][0]
+                arr_fix = populate_array(start_coord, end_coord, value)
+
+            elif bc_value['type'] == 'HVAR':
+                #~ for bc_var_value in bc_value['values']:
+                for bc_var_value in [i for i in bc_value['values'][:10]]:
+                    arr_var = populate_array(
+                        start_coord, end_coord, bc_var_value[0])
+                    var_map_list.append((arr_var,
+                                    bc_var_value[1],
+                                    bc_value['time_unit']))
+
+        for var_map in var_map_list:
+            # combine the var and fix map, giving priority to the var
+            arr_bcval = np.where(var_map[0], var_map[0], arr_fix)
+            # write GRASS map
+            rast_name_var = '{}_{}'.format(
+                rast_bcvalue_name, str(int(var_map[1])))
+            rast_id_var = tgis.AbstractMapDataset.build_id(
+                            rast_name_var, self.mapset)
+            write_raster(rast_id_var, arr_bcval, overwrite)
+            # add temporal informations
+            rast_var = tgis.RasterDataset(rast_id_var)
+            rast_var.set_relative_time(start_time=var_map[1],
+                        end_time=None, unit=var_map[2])
+            map_list.append(rast_var)
+
+        # Register maps in the space-time dataset
+        stds = tgis.open_old_stds(rast_bcvalue_name, 'strds', dbif=self.dbif)
+        tgis.register.register_map_object_list('raster',
+                            map_list, output_stds=stds,
+                                 delete_empty=True, unit=var_map[2],
+                                 dbif=self.dbif)
+
     def populate_user_flow_stds(self, rast_quser_name, overwrite):
         '''rast_quser_name: name of user flow raster map
         '''
-        arr_qfix = grass.array.array(dtype=np.float32)
-        arr_qvar = grass.array.array(dtype=np.float32)
-        arr_quser = grass.array.array(dtype=np.float32)
+        arr_qfix = garray.array(dtype=np.float32)
+        arr_qvar = garray.array(dtype=np.float32)
+        arr_quser = garray.array(dtype=np.float32)
 
         map_list = []
         var_map_list = []
@@ -508,11 +558,12 @@ class BoundaryConditions(object):
             map_list.append(rast_var)
 
         # Register maps in the space-time dataset
-        stds = tgis.open_old_stds(rast_quser_name, 'strds', dbif=self.dbif)
-        tgis.register.register_map_object_list('raster',
-                            map_list, output_stds=stds,
-                                 delete_empty=True, unit=var_map[2],
-                                 dbif=self.dbif)
+        if map_list:
+            stds = tgis.open_old_stds(rast_quser_name, 'strds', dbif=self.dbif)
+            tgis.register.register_map_object_list('raster',
+                                map_list, output_stds=stds,
+                                     delete_empty=True, unit=var_map[2],
+                                     dbif=self.dbif)
         return self
 
 
@@ -547,12 +598,13 @@ def calc_dist(point1, point2):
 def populate_array(start_coord, end_coord, value):
     '''start_coord, end_coord = a (row,col) tuple of array coordinates
     '''
+    reg = Region()
     start_row = start_coord[0]
     start_col = start_coord[1]
     end_row = end_coord[0]
     end_col = end_coord[1]
-    assert start_row >= end_row
-    assert start_col >= end_col
+    assert start_row <= end_row
+    assert start_col <= end_col
 
     # Make sure slices have at least one cell
     if start_row == end_row:
@@ -564,9 +616,26 @@ def populate_array(start_coord, end_coord, value):
     else:
         col_slice = slice(start_col, end_col)
     # value affectation
-    arr = grass.array.array(dtype=np.float32)
+    arr = np.zeros(shape=(reg.rows,reg.cols), dtype=np.float32)
     arr[row_slice, col_slice] = value
     return arr
+
+
+def write_raster(raster_name, arr, can_ovr):
+    """
+    write a grass raster
+    raster_name: the GRASS raster name
+    arr: the array to be written in GRASS raster
+    """
+    if can_ovr == True and raster.RasterRow(raster_name).exist() == True:
+        utils.remove(raster_name, 'raster')
+        #~ msgr.verbose(_("Removing raster map %s") % raster_name)
+    with raster.RasterRow(raster_name, mode='w', mtype='DCELL') as newraster:
+        newrow = raster.Buffer((arr.shape[1],), mtype='DCELL')
+        for row in arr:
+            newrow[:] = row[:]
+            newraster.put_row(newrow)
+
 
 if __name__ == "__main__":
     options, flags = grass.parser()
