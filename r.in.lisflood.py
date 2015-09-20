@@ -116,11 +116,15 @@ def main():
     if par.bdy_file:
         bdy_full_path = os.path.join(par.directory, par.bdy_file)
         bc.read_bdy(bdy_full_path)
+    # create STDS
     bc.create_stds(stds_name=rast_user_name, overwrite=grass.overwrite())
     bc.create_stds(rast_bcval_name, overwrite=grass.overwrite())
+    # Write maps en register them in STDS
     bc.populate_user_flow_stds(rast_quser_name=rast_user_name,
                                 overwrite=grass.overwrite())
     bc.populate_bc_stds(rast_bcval_name, grass.overwrite())
+    # write Boundary condition type map
+    bc.write_bctype(rast_bc_name, grass.overwrite())
 
     # Restore original region
     grass.del_temp_region()
@@ -477,13 +481,14 @@ class BoundaryConditions(object):
 
             if bc_value['type'] == 'HFIX':
                 value = bc_value['value'][0][0]
-                arr_fix = populate_array(start_coord, end_coord, value)
+                arr_fix = populate_array(
+                                arr_fix, start_coord, end_coord, value)
 
             elif bc_value['type'] == 'HVAR':
-                #~ for bc_var_value in bc_value['values']:
-                for bc_var_value in [i for i in bc_value['values'][:10]]:
+                for bc_var_value in bc_value['values']:
+                #~ for bc_var_value in [i for i in bc_value['values'][:10]]:
                     arr_var = populate_array(
-                        start_coord, end_coord, bc_var_value[0])
+                        arr_var, start_coord, end_coord, bc_var_value[0])
                     var_map_list.append((arr_var,
                                     bc_var_value[1],
                                     bc_value['time_unit']))
@@ -528,15 +533,15 @@ class BoundaryConditions(object):
                 value = bc_value['value'][0][0]
                 if not arr_qfix:
                     arr_qfix = populate_array(
-                                        start_coord, end_coord, value)
+                                arr_qfix, start_coord, end_coord, value)
                 # Add all qfix together to make only one map
                 else:
-                    arr_qfix += populate_array(start_coord,
+                    arr_qfix += populate_array(arr_qfix, start_coord,
                                                     end_coord, value)
 
             elif bc_value['type'] == 'QVAR':
                 for bc_var_value in bc_value['values']:
-                    arr_qvar = populate_array(
+                    arr_qvar = populate_array(arr_qvar,
                         start_coord, end_coord, bc_var_value[0])
                     var_map_list.append((arr_qvar,
                                     bc_var_value[1],
@@ -564,6 +569,22 @@ class BoundaryConditions(object):
                                 map_list, output_stds=stds,
                                      delete_empty=True, unit=var_map[2],
                                      dbif=self.dbif)
+        return self
+
+    def write_bctype(self, rast_bc_name, overwrite):
+        '''
+        '''
+        # default to closed boundary:
+        arr_bc = np.ones(shape=(self.region.rows, self.region.cols),
+                        dtype=np.uint8)
+        for bc_key, bc_value in self.content.iteritems():
+            start_coord = bc_value['start_coor']
+            end_coord = bc_value['end_coor']
+            bc_type = bc_value['type']
+            if bc_type not in ('QVAR', 'QFIX'):
+                arr_bc = populate_array(arr_bc, start_coord, end_coord,
+                            self.bc_conv[bc_type])
+        write_raster(rast_bc_name, arr_bc, overwrite)
         return self
 
 
@@ -595,7 +616,7 @@ def idx_exist(lst, idx):
 def calc_dist(point1, point2):
     return math.hypot(point2[0] - point1[0], point2[1] - point1[1])
 
-def populate_array(start_coord, end_coord, value):
+def populate_array(arr, start_coord, end_coord, value):
     '''start_coord, end_coord = a (row,col) tuple of array coordinates
     '''
     reg = Region()
@@ -616,7 +637,6 @@ def populate_array(start_coord, end_coord, value):
     else:
         col_slice = slice(start_col, end_col)
     # value affectation
-    arr = np.zeros(shape=(reg.rows,reg.cols), dtype=np.float32)
     arr[row_slice, col_slice] = value
     return arr
 
